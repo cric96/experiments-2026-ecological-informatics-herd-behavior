@@ -1,4 +1,4 @@
-# Herd Behaviour -- SISSY
+# Herd Behaviour
 
 A customized Alchemist Primer with releases and data analysis ready.
 
