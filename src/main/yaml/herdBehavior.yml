@@ -127,7 +127,7 @@ export:
     data:
       - time
       - type: SpeedExtractor
-      - type: PositionExporter
-        parameters: [ *NumberOfAnimals ]
+#      - type: PositionExporter
+#        parameters: [ *NumberOfAnimals ]
 #      - type: VelocityExtractorEuclidean
 #        parameters: [10]
