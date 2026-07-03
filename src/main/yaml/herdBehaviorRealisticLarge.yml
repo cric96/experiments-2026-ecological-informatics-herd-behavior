@@ -146,3 +146,6 @@ export:
       fileNameRoot: "velocity_simulation"
       interval: 10.0
       exportPath: "data-realistic-large"
+    data:
+      - time
+      - type: SpeedExtractor
