@@ -53,7 +53,7 @@ DROP_INIT_TIME = True                # drop simulation t=0 initialisation artefa
 MATCH_CENSORING = True               # apply the real 1 km/h floor to the simulation too
 N_BOOT = 2000                        # bootstrap resamples for CIs
 RNG = np.random.default_rng(42)
-KDE_BW = 1.6                         # KDE smoothing for the comparison figures
+KDE_BW = 1.8                         # KDE smoothing for the comparison figures (same as curve_similarity)
 
 # All comparison figures + the report land in their own folder so they are easy to
 # inspect on their own and never mix with the process.py charts in "charts/".
@@ -62,11 +62,29 @@ KDE_BW = 1.6                         # KDE smoothing for the comparison figures
 OUT_DIR = os.environ.get("OUT_DIR", "analysis")
 PICKLE_PREFIX = os.environ.get("PICKLE_PREFIX", "data_summary")
 
-# Colour-blind-safe categorical palette (validated data-viz reference instance).
-C_REAL = "#2a78d6"   # blue
-C_SIM = ["#1baf7a", "#eb6834", "#4a3aa7"]  # aqua, orange, violet for representative sims
-# Blue single-hue sequential ramp for the parameter-sweep heatmap.
-BLUE_RAMP = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+# Viridis-aligned palette. The simulated representatives are ORDERED (low/best/high
+# forward coefficient), so sampling them along viridis is a legitimate sequential use;
+# the real reference is black ink for maximum separation from the model curves.
+# CVD separation of the sim triple passes (ΔE ~33); the light-yellow end is avoided so
+# the lines stay readable on a white surface, and every panel carries a legend.
+SEQ_CMAP = "viridis"                          # sequential ramp (magnitude) for heatmaps/hue
+C_REAL = "#000000"                            # real reference: black ink
+C_SIM = ["#46337e", "#25848e", "#3fbc73"]     # viridis @ ~0.15 / 0.45 / 0.72 (low/best/high)
+C_BEST = "#25848e"                            # the best-fit simulated curve (viridis teal)
+C_HL = "#de3f82"                              # magenta highlight for the best-fit marker
+C_OVL = "#addc90"                             # soft viridis-green fill for the overlap area
+
+
+# Shared paper style — identical to the one used in process.py so every figure across
+# both scripts looks like it belongs to the same paper (same theme, fonts, weights).
+def apply_paper_style():
+    sns.set_theme(style="whitegrid", context="talk", font_scale=0.9)
+    plt.rcParams.update({
+        "pdf.fonttype": 42, "ps.fonttype": 42,   # embed TrueType (journal-safe), avoid Type-3
+        "savefig.bbox": "tight",
+        "axes.titlesize": "medium",
+        "legend.frameon": True,
+    })
 
 
 # ----------------------------------------------------------------------------------
@@ -250,16 +268,25 @@ def bootstrap_wasserstein(real, sim, n_boot=N_BOOT):
 # Parameter sweep: distance to real over the full (forward, lateral) grid
 # ----------------------------------------------------------------------------------
 def parameter_sweep(real_v, sim_df):
-    """Wasserstein & KS distance from real for every (forward, lateral) combination."""
+    """Distance + curve-similarity to real for every (forward, lateral) combination.
+
+    Computes, per parameter cell: Wasserstein & KS distance (sample-based) and the
+    curve-overlap (OVL) & Pearson shape-correlation (density-curve-based), so the whole
+    grid can be ranked by any of them and the best configurations tabulated.
+    """
     rows = []
     for (fwd, lat), g in sim_df.groupby(["intrinsicForwardCoefficient", "intrinsicLateralMultiplier"]):
         sv = censor(g["velocity"].values)
         if len(sv) < 20:
             continue
+        cs = curve_similarity(real_v, sv)
         rows.append({
             "forward": fwd, "lateral": lat,
             "wasserstein": stats.wasserstein_distance(real_v, sv),
             "ks": stats.ks_2samp(real_v, sv).statistic,
+            "overlap": cs["overlap"],
+            "pearson": cs["pearson"],
+            "hellinger": cs["hellinger"],
             "mean_sim": np.mean(sv),
             "std_sim": np.std(sv, ddof=1),
             "median_sim": np.median(sv),
@@ -270,55 +297,59 @@ def parameter_sweep(real_v, sim_df):
 # ----------------------------------------------------------------------------------
 # Figures
 # ----------------------------------------------------------------------------------
-def _seq_cmap():
-    from matplotlib.colors import LinearSegmentedColormap
-    return LinearSegmentedColormap.from_list("blues_seq", BLUE_RAMP)
+def _smooth_density(x, grid, smooth=1.8):
+    """Normalised gaussian-KDE density of x on `grid`, deliberately over-smoothed."""
+    kde = stats.gaussian_kde(x, bw_method="scott")
+    kde.set_bandwidth(kde.factor * smooth)
+    d = kde(grid)
+    dx = grid[1] - grid[0]
+    return d / (d.sum() * dx)
 
 
 def figure_distributions(real_df, sim_reps, labels):
-    """KDE + ECDF + QQ + violin for representative parameter sets."""
-    sns.set_theme(style="whitegrid")
-    sns.set_context("talk", font_scale=0.8)
+    """KDE + ECDF + QQ + violin for representative parameter sets (no titles, paper-ready)."""
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle("Real vs. Simulated Velocity Distributions (censored at 1 km/h)",
-                 fontsize=17, fontweight="bold", y=0.98)
     real_v = real_df["velocity"].values
     xmax = np.percentile(np.concatenate([real_v] + [s for s in sim_reps]), 99.5)
 
-    # A. KDE
+    def tag(ax, t):
+        ax.text(0.015, 0.97, t, transform=ax.transAxes, ha="left", va="top",
+                fontsize=15, fontweight="bold")
+
+    # (a) KDE
     ax = axes[0, 0]
-    sns.kdeplot(x=real_v, ax=ax, color=C_REAL, lw=3, fill=True, alpha=0.15,
+    sns.kdeplot(x=real_v, ax=ax, color=C_REAL, lw=3, fill=True, alpha=0.12,
                 bw_adjust=KDE_BW, label="Real (KABR)")
     for s, lab, c in zip(sim_reps, labels, C_SIM):
-        sns.kdeplot(x=s, ax=ax, color=c, lw=2, bw_adjust=KDE_BW, label=lab)
-    ax.set_title("A. Probability density (KDE)", fontsize=13, fontweight="semibold")
+        sns.kdeplot(x=s, ax=ax, color=c, lw=2.5, bw_adjust=KDE_BW, label=lab)
     ax.set_xlabel("Velocity (m/s)"); ax.set_ylabel("Density")
-    ax.set_xlim(0, xmax); ax.legend(fontsize=9, frameon=True, framealpha=0.9)
+    ax.set_xlim(0, xmax); ax.legend(fontsize=10, frameon=True, framealpha=0.9)
+    tag(ax, "(a)")
 
-    # B. ECDF
+    # (b) ECDF
     ax = axes[0, 1]
     sns.ecdfplot(x=real_v, ax=ax, color=C_REAL, lw=3, label="Real (KABR)")
     for s, lab, c in zip(sim_reps, labels, C_SIM):
-        sns.ecdfplot(x=s, ax=ax, color=c, lw=2, label=lab)
-    ax.set_title("B. Empirical CDF", fontsize=13, fontweight="semibold")
+        sns.ecdfplot(x=s, ax=ax, color=c, lw=2.5, label=lab)
     ax.set_xlabel("Velocity (m/s)"); ax.set_ylabel("Cumulative probability")
-    ax.set_xlim(0, xmax); ax.set_ylim(0, 1.02); ax.legend(fontsize=9)
+    ax.set_xlim(0, xmax); ax.set_ylim(0, 1.02); ax.legend(fontsize=10)
+    tag(ax, "(b)")
 
-    # C. QQ plot (sim quantiles vs real quantiles)
+    # (c) QQ plot (sim quantiles vs real quantiles)
     ax = axes[1, 0]
     q = np.linspace(0.01, 0.99, 99)
     rq = np.quantile(real_v, q)
     lim = 0
     for s, lab, c in zip(sim_reps, labels, C_SIM):
         sq = np.quantile(s, q)
-        ax.plot(rq, sq, "o", color=c, ms=4, alpha=0.7, label=lab)
+        ax.plot(rq, sq, "o", color=c, ms=5, alpha=0.8, label=lab)
         lim = max(lim, rq.max(), sq.max())
-    ax.plot([0, lim], [0, lim], "--", color="#898781", lw=1.5, label="y = x (identical)")
-    ax.set_title("C. Q-Q plot (sim vs. real quantiles)", fontsize=13, fontweight="semibold")
+    ax.plot([0, lim], [0, lim], "--", color="#7a7a7a", lw=1.5, label="y = x (identical)")
     ax.set_xlabel("Real quantiles (m/s)"); ax.set_ylabel("Simulated quantiles (m/s)")
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=10)
+    tag(ax, "(c)")
 
-    # D. Violin
+    # (d) Violin
     ax = axes[1, 1]
     data = [real_v] + list(sim_reps)
     names = ["Real (KABR)"] + labels
@@ -326,112 +357,101 @@ def figure_distributions(real_df, sim_reps, labels):
     for pc, c in zip(parts["bodies"], [C_REAL] + C_SIM):
         pc.set_facecolor(c); pc.set_alpha(0.55); pc.set_edgecolor(c)
     parts["cmedians"].set_color("#0b0b0b")
-    ax.set_yticks(range(1, len(names) + 1)); ax.set_yticklabels(names, fontsize=10)
-    ax.set_title("D. Quartiles & spread (violin)", fontsize=13, fontweight="semibold")
+    ax.set_yticks(range(1, len(names) + 1)); ax.set_yticklabels(names, fontsize=11)
     ax.set_xlabel("Velocity (m/s)"); ax.set_xlim(0, xmax)
+    tag(ax, "(d)")
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    path = os.path.join(OUT_DIR, "velocity_distribution_comparison.png")
-    fig.savefig(path, dpi=200, bbox_inches="tight"); plt.close(fig)
+    fig.tight_layout()
+    path = os.path.join(OUT_DIR, "velocity_distribution_comparison.pdf")
+    fig.savefig(path, bbox_inches="tight"); plt.close(fig)
     return path
 
 
 def figure_sweep(sweep_df, real_v, best):
-    """Parameter-sweep heatmap + distance curves + moment matching."""
-    sns.set_theme(style="whitegrid")
-    sns.set_context("talk", font_scale=0.8)
+    """Overlap heatmap + overlap-vs-forward curves + moment matching (no titles)."""
     fig, axes = plt.subplots(1, 3, figsize=(22, 6.5))
-    fig.suptitle("Parameter sweep: how simulation parameters approach the real distribution",
-                 fontsize=16, fontweight="bold", y=1.02)
     real_mean = real_v.mean()
     real_std = real_v.std(ddof=1)
+    cmap = plt.get_cmap(SEQ_CMAP)
 
-    # A. Heatmap of Wasserstein distance over (forward x lateral)
+    def tag(ax, t):
+        ax.text(0.02, 1.03, t, transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=15, fontweight="bold")
+
+    # (a) Heatmap of curve overlap (OVL, higher = better) over (forward x lateral)
     ax = axes[0]
-    piv = sweep_df.pivot(index="lateral", columns="forward", values="wasserstein")
-    im = ax.imshow(piv.values, aspect="auto", origin="lower", cmap=_seq_cmap())
+    piv = sweep_df.pivot(index="lateral", columns="forward", values="overlap")
+    im = ax.imshow(piv.values, aspect="auto", origin="lower", cmap=SEQ_CMAP)
     ax.set_yticks(range(len(piv.index))); ax.set_yticklabels([f"{v:.2f}" for v in piv.index])
     xt = np.linspace(0, len(piv.columns) - 1, 8).astype(int)
     ax.set_xticks(xt); ax.set_xticklabels([f"{piv.columns[i]:.2f}" for i in xt], rotation=45)
-    # mark the best cell
     bi = list(piv.index).index(best["lateral"])
     bj = list(piv.columns).index(best["forward"])
-    ax.plot(bj, bi, "*", color="#e34948", ms=22, markeredgecolor="white", markeredgewidth=1.2)
-    ax.set_title("A. Wasserstein distance to real (★ = best fit)", fontsize=12, fontweight="semibold")
+    ax.plot(bj, bi, "*", color=C_HL, ms=24, markeredgecolor="white", markeredgewidth=1.4)
     ax.set_xlabel("intrinsicForwardCoefficient"); ax.set_ylabel("intrinsicLateralMultiplier")
-    fig.colorbar(im, ax=ax, label="Wasserstein distance (m/s)")
+    fig.colorbar(im, ax=ax, label="Curve overlap (OVL)")
+    tag(ax, "(a)")
 
-    # B. Distance vs forward coefficient, one line per lateral
+    # (b) Overlap vs forward coefficient, one viridis line per lateral level
     ax = axes[1]
-    for lat, c in zip(sorted(sweep_df["lateral"].unique()), C_SIM):
+    laterals = sorted(sweep_df["lateral"].unique())
+    for i, lat in enumerate(laterals):
+        c = cmap(i / max(1, len(laterals) - 1))
         g = sweep_df[sweep_df["lateral"] == lat].sort_values("forward")
-        ax.plot(g["forward"], g["wasserstein"], "-o", color=c, ms=4, lw=2, label=f"lateral={lat:.2f}")
-    ax.axvline(best["forward"], color="#e34948", ls="--", lw=1.5, alpha=0.8)
-    ax.set_title("B. Distance vs. forward coefficient", fontsize=12, fontweight="semibold")
-    ax.set_xlabel("intrinsicForwardCoefficient"); ax.set_ylabel("Wasserstein distance (m/s)")
+        ax.plot(g["forward"], g["overlap"], "-o", color=c, ms=4, lw=2, label=f"lateral={lat:.2f}")
+    ax.axvline(best["forward"], color=C_HL, ls="--", lw=1.5, alpha=0.8)
+    ax.set_xlabel("intrinsicForwardCoefficient"); ax.set_ylabel("Curve overlap (OVL)")
     ax.legend(fontsize=10)
+    tag(ax, "(b)")
 
-    # C. Moment matching: sim mean/std vs forward, with real reference lines
+    # (c) Moment matching: sim mean/SD vs forward, with real reference lines
     ax = axes[2]
     g = sweep_df[sweep_df["lateral"] == best["lateral"]].sort_values("forward")
-    ax.plot(g["forward"], g["mean_sim"], "-o", color=C_SIM[0], ms=4, lw=2, label="Sim mean")
-    ax.plot(g["forward"], g["std_sim"], "-o", color=C_SIM[1], ms=4, lw=2, label="Sim SD")
+    ax.plot(g["forward"], g["mean_sim"], "-o", color=C_SIM[1], ms=4, lw=2, label="Sim mean")
+    ax.plot(g["forward"], g["std_sim"], "-o", color=C_SIM[2], ms=4, lw=2, label="Sim SD")
     ax.axhline(real_mean, color=C_REAL, ls="--", lw=2, label=f"Real mean ({real_mean:.3f})")
-    ax.axhline(real_std, color="#4a3aa7", ls=":", lw=2, label=f"Real SD ({real_std:.3f})")
-    ax.axvline(best["forward"], color="#e34948", ls="--", lw=1.5, alpha=0.6)
-    ax.set_title(f"C. Moment matching (lateral={best['lateral']:.2f})", fontsize=12, fontweight="semibold")
-    ax.set_xlabel("intrinsicForwardCoefficient"); ax.set_ylabel("Velocity (m/s)")
-    ax.legend(fontsize=9)
+    ax.axhline(real_std, color="#7a7a7a", ls=":", lw=2, label=f"Real SD ({real_std:.3f})")
+    ax.axvline(best["forward"], color=C_HL, ls="--", lw=1.5, alpha=0.6)
+    ax.set_xlabel(f"intrinsicForwardCoefficient (lateral={best['lateral']:.2f})")
+    ax.set_ylabel("Velocity (m/s)")
+    ax.legend(fontsize=10)
+    tag(ax, "(c)")
 
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    path = os.path.join(OUT_DIR, "parameter_sweep.png")
-    fig.savefig(path, dpi=200, bbox_inches="tight"); plt.close(fig)
+    fig.tight_layout()
+    path = os.path.join(OUT_DIR, "parameter_sweep.pdf")
+    fig.savefig(path, bbox_inches="tight"); plt.close(fig)
     return path
 
 
 def figure_overlap(real_v, sv_best, best, cs):
-    """Visualise curve similarity: the two density curves with their overlap shaded.
+    """Curve similarity: the two smoothed density curves with their overlap shaded.
 
-    The shaded area IS the overlapping coefficient (OVL) — the single most intuitive
-    "how much do the two curves coincide" number — with the other curve-similarity
-    metrics annotated alongside.
+    The shaded area IS the overlapping coefficient (OVL). Deliberately over-smoothed
+    so the comparison reads cleanly; a compact box reports the key similarity metrics.
     """
-    sns.set_theme(style="whitegrid")
-    sns.set_context("talk", font_scale=0.85)
     lo = min(real_v.min(), sv_best.min())
-    hi = np.percentile(np.concatenate([real_v, sv_best]), 99.5)
+    # Extend the x-axis to the far right tail so both full supports (and the simulated
+    # fast tail past the real max) are visible, not just the bulk.
+    hi = max(real_v.max(), np.percentile(np.concatenate([real_v, sv_best]), 99.9))
     grid = np.linspace(lo, hi, 512)
-    fr = stats.gaussian_kde(real_v, bw_method="scott")(grid)
-    fs = stats.gaussian_kde(sv_best, bw_method="scott")(grid)
-    dx = grid[1] - grid[0]
-    fr /= fr.sum() * dx
-    fs /= fs.sum() * dx
+    fr = _smooth_density(real_v, grid)
+    fs = _smooth_density(sv_best, grid)
     fmin = np.minimum(fr, fs)
 
     fig, ax = plt.subplots(figsize=(11, 6.5))
-    ax.plot(grid, fr, color=C_REAL, lw=3, label="Real (KABR)")
-    ax.plot(grid, fs, color=C_SIM[1], lw=3,
-            label=f"Sim best (fwd={best['forward']:.2f}, lat={best['lateral']:.2f})")
-    ax.fill_between(grid, fmin, color="#7a7a7a", alpha=0.35,
-                    label=f"Overlap (OVL = {cs['overlap']:.2f})")
-    ax.set_xlim(0, hi)
-    ax.set_xlabel("Velocity (m/s)")
-    ax.set_ylabel("Density")
-    ax.set_title("Curve similarity: real vs best-fit simulation", fontsize=15, fontweight="bold")
-    txt = (f"OVL (overlap)       {cs['overlap']:.3f}\n"
-           f"Hellinger           {cs['hellinger']:.3f}\n"
-           f"Total variation     {cs['tv']:.3f}\n"
-           f"Bhattacharyya       {cs['bhattacharyya']:.3f}\n"
-           f"Pearson (shape)     {cs['pearson']:.3f}\n"
-           f"Cosine              {cs['cosine']:.3f}\n"
-           f"Jeffreys (sym-KL)   {cs['jeffreys']:.3f}")
-    ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right", va="top",
-            family="monospace", fontsize=11,
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.9))
-    ax.legend(loc="upper left", fontsize=11)
+    # No legend entry for the shading — the overlap is shown visually, not labelled.
+    ax.fill_between(grid, fmin, color=C_OVL, alpha=0.55, lw=0)
+    ax.plot(grid, fr, color=C_REAL, lw=3.5, label="Real (KABR)")
+    ax.plot(grid, fs, color=C_BEST, lw=3.5, label="Simulation (best)")
+    ax.set_xlim(0, hi); ax.set_ylim(bottom=0)
+    ax.set_xlabel("Velocity (m/s)"); ax.set_ylabel("Density")
+    ax.text(0.97, 0.95, f"Pearson  {cs['pearson']:.3f}", transform=ax.transAxes,
+            ha="right", va="top", family="monospace", fontsize=12,
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.95))
+    ax.legend(loc="center right", fontsize=12, frameon=True, framealpha=0.9)
     fig.tight_layout()
-    path = os.path.join(OUT_DIR, "curve_similarity.png")
-    fig.savefig(path, dpi=200, bbox_inches="tight")
+    path = os.path.join(OUT_DIR, "curve_similarity.pdf")
+    fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
     return path
 
@@ -441,6 +461,7 @@ def figure_overlap(real_v, sv_best, best, cs):
 # ----------------------------------------------------------------------------------
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
+    apply_paper_style()
     print("Loading data...")
     real_df = load_real()
     sim_df = load_sim()
@@ -513,6 +534,8 @@ def main():
     # -----------------------------------------------------------------
     write_report(real_v, raw_sim, sweep, best, ci, stat_rows, labels, cs_best)
     print(f"\nReport written to {OUT_DIR}/analysis_report.md")
+    write_latex_tables(real_v, sweep, best, stat_rows, labels)
+    print(f"LaTeX tables written to {OUT_DIR}/tables.tex")
 
 
 def _interpret(js):
@@ -561,6 +584,26 @@ def write_report(real_v, raw_sim, sweep, best, ci, stat_rows, labels, cs_best):
                  f"(the two density curves share {cs_best['overlap']:.0%} of their area), "
                  f"Hellinger {cs_best['hellinger']:.3f}, total variation {cs_best['tv']:.3f}.\n")
 
+    lines.append("## Best configurations across the whole sweep\n")
+    lines.append("Curve overlap (OVL) and Pearson shape-correlation are computed on the density "
+                 "curves for **every** (forward, lateral) cell of the sweep; the table lists the "
+                 "eight closest to the real distribution, ranked by overlap. The ★ row is the "
+                 "overall best fit (minimum Wasserstein).\n")
+    top = sweep.sort_values("overlap", ascending=False).head(8).reset_index(drop=True)
+    tcols = ["", "forward", "lateral", "Overlap ↑", "Pearson ↑", "Wass. ↓ (m/s)", "sim mean", "sim SD"]
+    lines.append("| " + " | ".join(tcols) + " |")
+    lines.append("|" + "|".join(["---"] * len(tcols)) + "|")
+    for _, r in top.iterrows():
+        is_best = np.isclose(r["forward"], best["forward"]) and np.isclose(r["lateral"], best["lateral"])
+        b = "**" if is_best else ""
+        lines.append("| " + " | ".join([
+            "★" if is_best else "",
+            f"{b}{r['forward']:.3f}{b}", f"{b}{r['lateral']:.2f}{b}",
+            f"{b}{r['overlap']:.3f}{b}", f"{r['pearson']:.3f}",
+            f"{r['wasserstein']:.4f}", f"{r['mean_sim']:.3f}", f"{r['std_sim']:.3f}",
+        ]) + " |")
+    lines.append("")
+
     lines.append("## Statistical battery (representative forward coefficients, "
                  f"lateral={best['lateral']:.2f})\n")
     cols = ["Label", "N sim", "Wass. (m/s)", "Energy", "JS div", "sim mean", "Δmean",
@@ -593,11 +636,65 @@ def write_report(real_v, raw_sim, sweep, best, ci, stat_rows, labels, cs_best):
         ]) + " |")
     lines.append("")
 
-    lines.append("## How to change the simulation to match reality\n")
+    lines.append("## Remaining discrepancy\n")
     lines += recommendations(real_v, sweep, best)
 
     with open(os.path.join(OUT_DIR, "analysis_report.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
+
+
+def write_latex_tables(real_v, sweep, best, stat_rows, labels):
+    """Emit the headline tables as booktabs LaTeX, ready to \\input into the paper.
+
+    Requires \\usepackage{booktabs} in the document preamble.
+    """
+    out = [r"% Auto-generated by compare_distributions.py — needs \usepackage{booktabs}", ""]
+
+    # --- Table 1: best configurations across the whole sweep, ranked by overlap.
+    top = sweep.sort_values("overlap", ascending=False).head(8).reset_index(drop=True)
+    out += [
+        r"\begin{table}[t]", r"  \centering",
+        r"  \caption{Simulation configurations closest to the real (KABR) velocity "
+        r"distribution, ranked by curve overlap (OVL). Overlap and Pearson shape-correlation "
+        r"are computed on the density curves for every cell of the parameter sweep; the "
+        r"$\star$ row is the overall best fit (minimum Wasserstein distance $W$).}",
+        r"  \label{tab:best-configs}",
+        r"  \begin{tabular}{llcccccc}", r"    \toprule",
+        r"    & Forward & Lateral & OVL\,$\uparrow$ & Pearson\,$\uparrow$ & "
+        r"$W$\,$\downarrow$ (m/s) & Mean & SD \\", r"    \midrule",
+    ]
+    for _, r in top.iterrows():
+        is_best = np.isclose(r["forward"], best["forward"]) and np.isclose(r["lateral"], best["lateral"])
+        bold = (lambda s: r"\textbf{" + s + "}") if is_best else (lambda s: s)
+        out.append("    " + " & ".join([
+            r"$\star$" if is_best else "",
+            bold(f"{r['forward']:.3f}"), bold(f"{r['lateral']:.2f}"),
+            bold(f"{r['overlap']:.3f}"), f"{r['pearson']:.3f}",
+            f"{r['wasserstein']:.4f}", f"{r['mean_sim']:.3f}", f"{r['std_sim']:.3f}",
+        ]) + r" \\")
+    out += [r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
+
+    # --- Table 2: curve-shape similarity for the representative configurations.
+    out += [
+        r"\begin{table}[t]", r"  \centering",
+        r"  \caption{Curve-shape similarity between the real and simulated velocity densities "
+        r"at representative forward coefficients (lateral $=" + f"{best['lateral']:.2f}" + r"$). "
+        r"$\uparrow$/$\downarrow$ mark the direction of closer agreement.}",
+        r"  \label{tab:curve-similarity}",
+        r"  \begin{tabular}{lccccc}", r"    \toprule",
+        r"    Configuration & OVL\,$\uparrow$ & Pearson\,$\uparrow$ & "
+        r"Hellinger\,$\downarrow$ & TV\,$\downarrow$ & $W$\,$\downarrow$ (m/s) \\", r"    \midrule",
+    ]
+    for lab, r in zip(labels, stat_rows):
+        name = lab.replace("★", r"$\star$")
+        out.append("    " + " & ".join([
+            name, f"{r['overlap']:.3f}", f"{r['pearson']:.3f}",
+            f"{r['hellinger']:.3f}", f"{r['tv']:.3f}", f"{r['wasserstein']:.4f}",
+        ]) + r" \\")
+    out += [r"    \bottomrule", r"  \end{tabular}", r"\end{table}", ""]
+
+    with open(os.path.join(OUT_DIR, "tables.tex"), "w") as f:
+        f.write("\n".join(out) + "\n")
 
 
 def recommendations(real_v, sweep, best):

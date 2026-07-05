@@ -482,6 +482,7 @@ if __name__ == '__main__':
     import seaborn as sns
     import pandas as pd
     import seaborn.objects as so
+    from scipy import stats
     from seaborn import axes_style
 
     os.makedirs(output_directory, exist_ok=True)
@@ -489,16 +490,22 @@ if __name__ == '__main__':
     so.Plot.config.theme.update(axes_style("whitegrid"))
 
     sns.color_palette("viridis", as_cmap=True)
-    sns.set_theme(style="whitegrid")
-    # increase fontsize
-    sns.set_context("paper", font_scale=2.2)
+    # Shared paper style — identical to compare_distributions.py so every figure across
+    # both scripts looks like it belongs to the same paper (same theme, fonts, weights).
+    sns.set_theme(style="whitegrid", context="talk", font_scale=0.9)
+    matplotlib.rcParams.update({
+        "pdf.fonttype": 42, "ps.fonttype": 42,   # embed TrueType (journal-safe), avoid Type-3
+        "savefig.bbox": "tight",
+        "axes.titlesize": "medium",
+        "legend.frameon": True,
+    })
 
     # --- Shared comparison settings -------------------------------------------------
     # Both datasets are treated identically so the simulated and real plots can be read
     # on the same axes: same unit (m/s), same velocity floor, same smoothing, same range.
     FLOOR_KMH = 1.0                 # the KABR tracker cannot resolve motion below 1 km/h
     FLOOR_MS = FLOOR_KMH / 3.6      # ~0.278 m/s
-    BW = 1.0                        # KDE smoothing, identical for sim and real
+    BW = 1.8                        # KDE smoothing, identical for sim and real (same as curve_similarity)
     XMAX_MS = 4.0                   # covers the simulated support (~3.8 m/s) and all real data
     CLIP = (FLOOR_MS, XMAX_MS)
 
@@ -548,6 +555,14 @@ if __name__ == '__main__':
         ax.set_xlim(0, XMAX_MS)
     g.set_titles("LateralVelocityMultiplier={col_name}")
     g.set_xlabels("Velocity (m/s)")
+    # Colour legend: intrinsicForwardCoefficient is a continuous swept variable, so the
+    # colours are a viridis ramp — a colorbar is the correct legend for them.
+    norm = matplotlib.colors.Normalize(vmin=min(coefficients_to_keep),
+                                       vmax=max(coefficients_to_keep))
+    sm = cmx.ScalarMappable(cmap='viridis', norm=norm)
+    sm.set_array([])
+    g.figure.subplots_adjust(right=0.9)
+    g.figure.colorbar(sm, ax=list(g.axes.flat), label='intrinsicForwardCoefficient')
     g.savefig(f"{output_directory}/velocity_simulation.pdf")
 
     # --- Real velocity plot ---------------------------------------------------------
@@ -562,10 +577,9 @@ if __name__ == '__main__':
 
     plt.figure(figsize=(10, 6), layout='tight')
     real_plot = sns.kdeplot(data=real_dataset, x='velocity', color='#2a78d6',
-                            fill=True, alpha=0.2, bw_adjust=BW, clip=CLIP)
+                            bw_adjust=BW, clip=CLIP)
     plt.xlim(0, XMAX_MS)
     plt.xlabel("Velocity (m/s)")
-    plt.title("Velocity Distribution From KABR Dataset (>1 km/h)")
     real_plot.get_figure().savefig(f"{output_directory}/velocity_reconstruction.pdf")
 
     # --- Direct overlay: real vs pooled simulation ----------------------------------
@@ -581,11 +595,33 @@ if __name__ == '__main__':
     ax.axvline(dataset['velocity'].mean(), color='#eb6834', ls='--', lw=1.5)
     ax.set_xlim(0, XMAX_MS)
     ax.set_xlabel("Velocity (m/s)")
-    ax.set_title("Real vs Simulated Velocity Distribution (>1 km/h)")
-    ax.legend()
+
+    # --- Similarity metrics (real vs pooled sim), same computation as curve_similarity
+    # in compare_distributions.py: densities on a shared grid, then overlap/Pearson.
+    real_v = real_dataset['velocity'].values
+    sim_v = dataset['velocity'].values
+    grid = np.linspace(0, XMAX_MS, 512)
+    dx = grid[1] - grid[0]
+    kde_r = stats.gaussian_kde(real_v, bw_method="scott"); kde_r.set_bandwidth(kde_r.factor * BW)
+    kde_s = stats.gaussian_kde(sim_v, bw_method="scott"); kde_s.set_bandwidth(kde_s.factor * BW)
+    fr, fs = kde_r(grid), kde_s(grid)
+    fr /= fr.sum() * dx; fs /= fs.sum() * dx
+    overlap = float(np.sum(np.minimum(fr, fs)) * dx)
+    pearson = float(np.corrcoef(fr, fs)[0, 1])
+    d_mean = dataset['velocity'].mean() - real_dataset['velocity'].mean()
+    d_std = dataset['velocity'].std() - real_dataset['velocity'].std()
+    txt = (f"Overlap   {overlap:.3f}\n"
+           f"Pearson   {pearson:.3f}\n"
+           f"Δ mean    {d_mean:+.3f} m/s\n"
+           f"Δ SD      {d_std:+.3f} m/s")
+    ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right", va="top",
+            family="monospace", fontsize=11,
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.95))
+    ax.legend(loc="center right")
     ax.get_figure().savefig(f"{output_directory}/velocity_real_vs_sim.pdf")
 
     print(f"Real:  N={len(real_dataset)}  mean={real_dataset['velocity'].mean():.3f} m/s")
     print(f"Sim :  N={len(dataset)}  mean={dataset['velocity'].mean():.3f} m/s")
+    print(f"Overlap={overlap:.3f}  Pearson={pearson:.3f}  Δmean={d_mean:+.3f}  ΔSD={d_std:+.3f}")
 
     plt.show()
