@@ -130,7 +130,7 @@ def extractVariableNames(filename):
 
     """
     with open(filename, 'r') as file:
-        dataBegin = re.compile('\d')
+        dataBegin = re.compile(r'\d')
         lastHeaderLine = ''
         for line in file:
             if dataBegin.match(line[0]):
@@ -138,7 +138,7 @@ def extractVariableNames(filename):
             else:
                 lastHeaderLine = line
         if lastHeaderLine:
-            regex = re.compile(' (?P<varName>\S+)')
+            regex = re.compile(r' (?P<varName>\S+)')
             return regex.findall(lastHeaderLine)
         return []
 
@@ -158,7 +158,7 @@ def openCsv(path):
         A matrix with the values of the csv file
 
     """
-    regex = re.compile('\d')
+    regex = re.compile(r'\d')
     with open(path, 'r') as file:
         lines = filter(lambda x: regex.match(x[0]), file.readlines())
         return [[float(x) for x in line.split()] for line in lines]
