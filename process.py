@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import xarray as xr
 import re
@@ -129,7 +130,7 @@ def extractVariableNames(filename):
 
     """
     with open(filename, 'r') as file:
-        dataBegin = re.compile('\d')
+        dataBegin = re.compile(r'\d')
         lastHeaderLine = ''
         for line in file:
             if dataBegin.match(line[0]):
@@ -137,7 +138,7 @@ def extractVariableNames(filename):
             else:
                 lastHeaderLine = line
         if lastHeaderLine:
-            regex = re.compile(' (?P<varName>\S+)')
+            regex = re.compile(r' (?P<varName>\S+)')
             return regex.findall(lastHeaderLine)
         return []
 
@@ -157,7 +158,7 @@ def openCsv(path):
         A matrix with the values of the csv file
 
     """
-    regex = re.compile('\d')
+    regex = re.compile(r'\d')
     with open(path, 'r') as file:
         lines = filter(lambda x: regex.match(x[0]), file.readlines())
         return [[float(x) for x in line.split()] for line in lines]
@@ -190,16 +191,18 @@ def beautifyValue(v):
 
 if __name__ == '__main__':
     # CONFIGURE SCRIPT
-    # Where to find Alchemist data files
-    directory = 'data'
-    # Where to save charts
-    output_directory = 'charts'
-    # How to name the summary of the processed data
-    pickleOutput = 'data_summary'
+    # Where to find Alchemist data files (override with DATA_DIR for a different run,
+    # e.g. the realistic variant that exports to data-realistic/).
+    directory = os.environ.get('DATA_DIR', 'data')
+    # Where to save charts (override with OUT_DIR to keep runs side by side).
+    output_directory = os.environ.get('OUT_DIR', 'charts')
+    # How to name the summary of the processed data (override with PICKLE_PREFIX so a
+    # second run does not clobber the validated data_summary_* pickle).
+    pickleOutput = os.environ.get('PICKLE_PREFIX', 'data_summary')
     # Experiment prefixes: one per experiment (root of the file name)
     experiments = ['velocity_simulation']
     floatPrecision = '{: 0.3f}'
-    # Number of time samples 
+    # Number of time samples
     timeSamples = 10
     # time management
     minTime = 0
@@ -296,10 +299,11 @@ if __name__ == '__main__':
     import pickle
     import os
 
+    timeProcessedFile = f'{pickleOutput}_timeprocessed'
     if os.path.exists(directory):
         newestFileTime = max([os.path.getmtime(directory + '/' + file) for file in os.listdir(directory)], default=0.0)
         try:
-            lastTimeProcessed = pickle.load(open('timeprocessed', 'rb'))
+            lastTimeProcessed = pickle.load(open(timeProcessedFile, 'rb'))
         except:
             lastTimeProcessed = -1
         shouldRecompute = not os.path.exists(".skip_data_process") and newestFileTime != lastTimeProcessed
@@ -377,7 +381,7 @@ if __name__ == '__main__':
             # Save the datasets
             pickle.dump(means, open(pickleOutput + '_mean', 'wb'), protocol=-1)
             pickle.dump(stdevs, open(pickleOutput + '_std', 'wb'), protocol=-1)
-            pickle.dump(newestFileTime, open('timeprocessed', 'wb'))
+            pickle.dump(newestFileTime, open(timeProcessedFile, 'wb'))
     else:
         means = {experiment: xr.Dataset() for experiment in experiments}
         stdevs = {experiment: xr.Dataset() for experiment in experiments}
@@ -478,6 +482,7 @@ if __name__ == '__main__':
     import seaborn as sns
     import pandas as pd
     import seaborn.objects as so
+    from scipy import stats
     from seaborn import axes_style
 
     os.makedirs(output_directory, exist_ok=True)
@@ -485,61 +490,148 @@ if __name__ == '__main__':
     so.Plot.config.theme.update(axes_style("whitegrid"))
 
     sns.color_palette("viridis", as_cmap=True)
-    sns.set_theme(style="whitegrid")
-    # increase fontsize
-    sns.set_context("paper", font_scale=2.2)
+    # Shared paper style — identical to compare_distributions.py so every figure across
+    # both scripts looks like it belongs to the same paper (same theme, fonts, weights).
+    sns.set_theme(style="whitegrid", context="talk", font_scale=0.9)
+    matplotlib.rcParams.update({
+        "pdf.fonttype": 42, "ps.fonttype": 42,   # embed TrueType (journal-safe), avoid Type-3
+        "savefig.bbox": "tight",
+        "axes.titlesize": "medium",
+        "legend.frameon": True,
+    })
 
+    # --- Shared comparison settings -------------------------------------------------
+    # Both datasets are treated identically so the simulated and real plots can be read
+    # on the same axes: same unit (m/s), same velocity floor, same smoothing, same range.
+    FLOOR_KMH = 1.0                 # the KABR tracker cannot resolve motion below 1 km/h
+    FLOOR_MS = FLOOR_KMH / 3.6      # ~0.278 m/s
+    BW = 1.8                        # KDE smoothing, identical for sim and real (same as curve_similarity)
+    XMAX_MS = 4.0                   # covers the simulated support (~3.8 m/s) and all real data
+    CLIP = (FLOOR_MS, XMAX_MS)
+
+    # --- Simulated data -------------------------------------------------------------
     dataset = means['velocity_simulation'].to_dataframe().reset_index()
     dataset = dataset.melt(id_vars=['time', 'intrinsicForwardCoefficient', 'intrinsicLateralMultiplier', 'NumberOfHerds'],
                                   value_vars=[col for col in dataset.columns if col.startswith('node-')],
-                                  var_name='node', value_name='velocity')
-    print(dataset)
+                                  var_name='node', value_name='velocity').dropna()
+    # Drop the t=0 initialisation artefact (every agent starts at velocity 0).
+    dataset = dataset[dataset['time'] > 0]
+    dataset['velocity'] = dataset['velocity'] / 3.6  # convert to m/s
+    # Remove the "zero"/stationary spike so the simulated support matches the real one,
+    # which is censored at 1 km/h. Without this the sim carries a large mass of agents
+    # below the tracker resolution that the real data can never contain.
+    dataset = dataset[dataset['velocity'] >= FLOOR_MS]
+
     n = 2  # Define the interval for removal
     all_coefficients = sorted(dataset['intrinsicForwardCoefficient'].unique())
-    # print(all_coefficients)
     coefficients_to_keep = [coef for i, coef in enumerate(all_coefficients) if i % n == 0]
-    # print(coefficients_to_keep)
     dataset = dataset[dataset['intrinsicForwardCoefficient'].isin(coefficients_to_keep)]
-    dataset['velocity'] = dataset['velocity'] / 3.6  # convert to m/s
 
-    plt.figure(figsize=(10, 6), layout='tight')
-    g = sns.FacetGrid(
-        dataset,
-        col='intrinsicLateralMultiplier',
-        aspect=1.7,
-        height=5,
-        col_wrap=3,
-        sharex=False,
-        sharey=False
-    )
-    g.map_dataframe(
-        sns.kdeplot,
-        x='velocity',
-        hue='intrinsicForwardCoefficient',
-        hue_order=coefficients_to_keep.reverse(),
-        linewidth=0.5,
-        palette='viridis',
-        bw_adjust=4.5,
-        clip=(0, 13),
-    )
-    g.set_titles("LateralVelocityMultiplier={col_name}")
-    g.set_xlabels("Velocity (m/s)")
-    g.savefig(f"{output_directory}/velocity_simulation.pdf")
+    simulation_data_available = not dataset.empty and dataset['velocity'].nunique() > 1
+    if simulation_data_available:
+        g = sns.FacetGrid(
+            dataset,
+            col='intrinsicLateralMultiplier',
+            aspect=1.7,
+            height=5,
+            col_wrap=3,
+            sharex=True,
+            sharey=True,
+        )
+        # common_norm=True keeps the RELATIVE mass of each forward coefficient instead of
+        # rescaling every curve to unit area; this way tall/short curves reflect how much
+        # probability each parameter actually puts at a given speed and can be read against
+        # the real distribution on the same y-scale.
+        g.map_dataframe(
+            sns.kdeplot,
+            x='velocity',
+            hue='intrinsicForwardCoefficient',
+            linewidth=0.8,
+            palette='viridis',
+            bw_adjust=BW,
+            clip=CLIP,
+            common_norm=True,
+        )
+        for ax in g.axes.flat:
+            ax.set_xlim(0, XMAX_MS)
+        g.set_titles("LateralVelocityMultiplier={col_name}")
+        g.set_xlabels("Velocity (m/s)")
+        # Colour legend: intrinsicForwardCoefficient is a continuous swept variable, so the
+        # colours are a viridis ramp — a colorbar is the correct legend for them.
+        norm = matplotlib.colors.Normalize(vmin=min(coefficients_to_keep),
+                                           vmax=max(coefficients_to_keep))
+        sm = cmx.ScalarMappable(cmap='viridis', norm=norm)
+        sm.set_array([])
+        g.figure.subplots_adjust(right=0.9)
+        g.figure.colorbar(sm, ax=list(g.axes.flat), label='intrinsicForwardCoefficient')
+        g.savefig(f"{output_directory}/velocity_simulation.pdf")
+        plt.close(g.figure)
+    else:
+        print(
+            "WARNING: Skipping simulation velocity charts: no varying samples remain "
+            "after removing initialization and sub-1-km/h values."
+        )
 
-    # Real velocity plot -----------------------------------------------------------------------------------------------
+    # --- Real velocity plot ---------------------------------------------------------
     real_dataset = pd.read_csv("data/velocity_reconstruction.csv", delimiter=' ', comment='#', names=list(range(10)))
-    # rename the column 0 into 'time'
     real_dataset.rename(columns={0: 'time'}, inplace=True)
-    # melt the dataset
-    plt.figure(figsize=(10, 6), layout='tight')
-    real_dataset = real_dataset.melt(id_vars=['time'], var_name='node', value_name='velocity')
+    real_dataset = real_dataset.melt(id_vars=['time'], var_name='node', value_name='velocity').dropna()
     real_dataset['velocity'] = real_dataset['velocity'] / 3.6  # convert to m/s
-    real_plot = sns.kdeplot(data=real_dataset, x='velocity', palette='viridis', bw_adjust=2.5, clip=(0, 13))
-    plt.xlim(0, 6.5)
+    # "Togliere lo zero": drop the 1 km/h floor spike (~20% of samples), i.e. the
+    # animals sitting at the tracker's minimum resolvable speed. What remains is the
+    # distribution of genuinely moving animals, directly comparable to the sim above.
+    real_dataset = real_dataset[real_dataset['velocity'] > FLOOR_MS]
+
+    plt.figure(figsize=(10, 6), layout='tight')
+    real_plot = sns.kdeplot(data=real_dataset, x='velocity', color='#2a78d6',
+                            bw_adjust=BW, clip=CLIP)
+    plt.xlim(0, XMAX_MS)
     plt.xlabel("Velocity (m/s)")
-    plt.title("Velocity Distribution From KABR Dataset")
     real_plot.get_figure().savefig(f"{output_directory}/velocity_reconstruction.pdf")
 
-    print(real_dataset)
+    if simulation_data_available:
+        # --- Direct overlay: real vs pooled simulation ------------------------------
+        # A single figure so the two can be compared at a glance on identical axes. Each
+        # curve is a probability density (area 1) because the sample sizes differ by orders
+        # of magnitude; the shapes, modes and tails are what carry the comparison.
+        plt.figure(figsize=(10, 6), layout='tight')
+        ax = sns.kdeplot(data=real_dataset, x='velocity', color='#2a78d6', fill=True,
+                         alpha=0.2, bw_adjust=BW, clip=CLIP, linewidth=3, label='Real (KABR)')
+        sns.kdeplot(data=dataset, x='velocity', color='#eb6834', bw_adjust=BW, clip=CLIP,
+                    linewidth=3, label='Simulation (all params pooled)')
+        ax.axvline(real_dataset['velocity'].mean(), color='#2a78d6', ls='--', lw=1.5)
+        ax.axvline(dataset['velocity'].mean(), color='#eb6834', ls='--', lw=1.5)
+        ax.set_xlim(0, XMAX_MS)
+        ax.set_xlabel("Velocity (m/s)")
+
+        # --- Similarity metrics (real vs pooled sim), same computation as
+        # curve_similarity in compare_distributions.py: densities on a shared grid,
+        # then overlap/Pearson.
+        real_v = real_dataset['velocity'].values
+        sim_v = dataset['velocity'].values
+        grid = np.linspace(0, XMAX_MS, 512)
+        dx = grid[1] - grid[0]
+        kde_r = stats.gaussian_kde(real_v, bw_method="scott"); kde_r.set_bandwidth(kde_r.factor * BW)
+        kde_s = stats.gaussian_kde(sim_v, bw_method="scott"); kde_s.set_bandwidth(kde_s.factor * BW)
+        fr, fs = kde_r(grid), kde_s(grid)
+        fr /= fr.sum() * dx; fs /= fs.sum() * dx
+        overlap = float(np.sum(np.minimum(fr, fs)) * dx)
+        pearson = float(np.corrcoef(fr, fs)[0, 1])
+        d_mean = dataset['velocity'].mean() - real_dataset['velocity'].mean()
+        d_std = dataset['velocity'].std() - real_dataset['velocity'].std()
+        txt = (f"Overlap   {overlap:.3f}\n"
+               f"Pearson   {pearson:.3f}\n"
+               f"Δ mean    {d_mean:+.3f} m/s\n"
+               f"Δ SD      {d_std:+.3f} m/s")
+        ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right", va="top",
+                family="monospace", fontsize=11,
+                bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.95))
+        ax.legend(loc="center right")
+        ax.get_figure().savefig(f"{output_directory}/velocity_real_vs_sim.pdf")
+
+        print(f"Sim :  N={len(dataset)}  mean={dataset['velocity'].mean():.3f} m/s")
+        print(f"Overlap={overlap:.3f}  Pearson={pearson:.3f}  Δmean={d_mean:+.3f}  ΔSD={d_std:+.3f}")
+
+    print(f"Real:  N={len(real_dataset)}  mean={real_dataset['velocity'].mean():.3f} m/s")
 
     plt.show()

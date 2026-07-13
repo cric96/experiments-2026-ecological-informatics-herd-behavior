@@ -1,0 +1,151 @@
+# Large-SWEEP version of herdBehaviorRealistic.yml.
+#
+# "Large scale" here means a richer exploration of the parameters that are actually
+# read back in the charts (the swept variables), NOT bigger herds / arena / runtime.
+# Everything that was FIXED in the initial simulation is kept identical:
+#   * NumberOfAnimals 140, EnvironmentSize 2000 m, simulated time 1800 s  (unchanged)
+# The realistic dynamics (leader/trailer/zone contrast) are also unchanged.
+#
+# What is expanded vs herdBehaviorRealistic.yml — the sweep you verify in the plots:
+#   * intrinsicForwardCoefficient : 8 -> 20 geometric points, range 0.2..0.45 -> 0.15..0.6
+#                                   (finer + wider, so the full mean/spread trend is visible)
+#   * intrinsicLateralMultiplier  : 3 -> 6 levels, now including values BELOW 0.25
+#                                   (the analysis found the optimum sat on the 0.25 edge)
+#
+# Batch = 10 seeds x 20 forward x 6 lateral = 1200 runs (140 agents, 1800 s each).
+incarnation: protelis
+
+variables:
+  seed: &seed
+    min: 0
+    max: 9
+    step: 1
+    default: 0
+  bodyLength: &bodyLen
+    formula: 2
+  bodyWidth: &bodyWidth
+    formula: bodyLength / 2
+  NumberOfAnimals: &NumberOfAnimals
+    formula: 140
+  stressZoneRadius:
+    formula: 1.5 * bodyLength
+  neutralZoneRadius:
+    formula: 10 * bodyLength
+  attractionZoneRadius:
+    formula: 20 * bodyLength
+  rearZoneRadius:
+    formula: attractionZoneRadius
+  EnvironmentSize:
+    formula: 2000 # meters
+  EnvironmentRadius: &EnvironmentRadius
+    formula: EnvironmentSize / 2
+  NumberOfHerds: &HerdNumber
+    type: ArbitraryVariable
+    parameters: [ 2, [1, 2] ]
+  # Finer + wider geometric sweep around the measured best fit (~0.40).
+  intrinsicForwardCoefficient:
+    type: GeometricVariable
+    parameters: [ 0.40, 0.15, 0.6, 20 ]
+  # More lateral levels, including values below 0.25 (the previous optimum was on the edge).
+  intrinsicLateralMultiplier:
+    type: ArbitraryVariable
+    parameters: [ 0.25, [0.1, 0.15, 0.25, 0.4, 0.55, 0.7] ]
+  intrinsicLateralCoefficient:
+    formula: intrinsicForwardCoefficient * intrinsicLateralMultiplier
+  intrinsicForwardVelocity:
+    formula: intrinsicForwardCoefficient * bodyLength
+  intrinsicLateralVelocity:
+    formula: intrinsicLateralCoefficient * bodyLength
+  # Leaders slow down harder (0.7 -> 0.5): deepens the slow mode near the floor.
+  leadersSlowDown:
+    formula: 0.5 # [0; 1] if there are neighbors in rear zone slow down by this value
+  leadersSlowDownProbability:
+    formula: 0.85
+  # Trailers speed up harder and more often (2.0@0.4 -> 3.0@0.5): builds the right tail.
+  trailersSpeedUp:
+    formula: 3.0
+  trailersSpeedUpProbability:
+    formula: 0.5
+  zonesRadii: &zonesRadii
+    formula: listOf(stressZoneRadius, neutralZoneRadius, attractionZoneRadius, rearZoneRadius)
+    language: kotlin
+  velocities: &velocities
+    formula: listOf(intrinsicLateralVelocity, intrinsicForwardVelocity)
+    language: kotlin
+  # More lateral movement (0.25/0.5/0.25 -> 0.35/0.3/0.35): more velocity variability.
+  movementProbabilities: &movementProbabilities
+    formula: listOf(0.35, 0.3, 0.35) # Probability to go [left, forward, right]
+    language: kotlin
+  # Stronger repulsion when crowded (0.5 -> 0.4): more low-speed mass.
+  stressZoneRepulsionFactor: &stressRepulsionFactor
+    formula: 0.4 # [0; 1] Slow down by this factor if there are neighbors ahead of the individual in the stress zone.
+  attractionSpeedUp: &attractionSpeedUpFactor
+    formula: 1.6 # [1; inf] if there are nodes in attraction zone multiply the speed-up factor to current velocity
+  leaderSpeedChange: &leaderSpeedChange
+    formula: listOf(leadersSlowDown, leadersSlowDownProbability)
+    language: kotlin
+  trailerSpeedChange: &trailerSpeedChange
+    formula: listOf(trailersSpeedUp, trailersSpeedUpProbability)
+    language: kotlin
+
+seeds:
+  scenario: *seed
+  simulation: *seed
+
+launcher:
+  parameters:
+    batch: [seed, intrinsicForwardCoefficient, intrinsicLateralMultiplier]
+
+network-model:
+  type: ConnectWithinDistance
+  parameters: [0.5]
+
+_herdParameters: &herdParameters
+  - *zonesRadii
+  - *velocities
+  - *movementProbabilities
+  - *stressRepulsionFactor
+  - *attractionSpeedUpFactor
+  - *leaderSpeedChange
+  - *trailerSpeedChange
+  - *HerdNumber
+  - *EnvironmentRadius
+  - *seed
+
+_herd: &herd
+  - time-distribution: 1
+    type: Event
+    actions:
+      type: HerdBehavior
+      parameters: *herdParameters
+_animal_area: &animalArea
+  - type: RectangularArea
+    parameters: [ *bodyLen, *bodyWidth ]
+
+environment:
+  type: MovementTrackerPhysics2DEnvironment
+  parameters: ["drone"]
+
+deployments:
+  - type: GroupsDeployment
+    parameters: [*NumberOfAnimals, 0, 0, *EnvironmentRadius, *HerdNumber, 25]
+    contents:
+      - molecule: zebra
+        concentration: true
+    programs: *herd
+    properties: *animalArea
+
+terminate:
+  - type: AfterTime
+    parameters: [ 1800 ]
+
+export:
+  - type: CSVExporter
+    parameters:
+      # Separate root + folder so this variant never clobbers the other datasets.
+      fileNameRoot: "velocity_simulation"
+      interval: 10.0
+      exportPath: "data-realistic-large"
+    data:
+      - time
+      - type: SpeedExtractor
