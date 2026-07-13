@@ -527,43 +527,50 @@ if __name__ == '__main__':
     coefficients_to_keep = [coef for i, coef in enumerate(all_coefficients) if i % n == 0]
     dataset = dataset[dataset['intrinsicForwardCoefficient'].isin(coefficients_to_keep)]
 
-    plt.figure(figsize=(10, 6), layout='tight')
-    g = sns.FacetGrid(
-        dataset,
-        col='intrinsicLateralMultiplier',
-        aspect=1.7,
-        height=5,
-        col_wrap=3,
-        sharex=True,
-        sharey=True,
-    )
-    # common_norm=True keeps the RELATIVE mass of each forward coefficient instead of
-    # rescaling every curve to unit area; this way tall/short curves reflect how much
-    # probability each parameter actually puts at a given speed and can be read against
-    # the real distribution on the same y-scale.
-    g.map_dataframe(
-        sns.kdeplot,
-        x='velocity',
-        hue='intrinsicForwardCoefficient',
-        linewidth=0.8,
-        palette='viridis',
-        bw_adjust=BW,
-        clip=CLIP,
-        common_norm=True,
-    )
-    for ax in g.axes.flat:
-        ax.set_xlim(0, XMAX_MS)
-    g.set_titles("LateralVelocityMultiplier={col_name}")
-    g.set_xlabels("Velocity (m/s)")
-    # Colour legend: intrinsicForwardCoefficient is a continuous swept variable, so the
-    # colours are a viridis ramp — a colorbar is the correct legend for them.
-    norm = matplotlib.colors.Normalize(vmin=min(coefficients_to_keep),
-                                       vmax=max(coefficients_to_keep))
-    sm = cmx.ScalarMappable(cmap='viridis', norm=norm)
-    sm.set_array([])
-    g.figure.subplots_adjust(right=0.9)
-    g.figure.colorbar(sm, ax=list(g.axes.flat), label='intrinsicForwardCoefficient')
-    g.savefig(f"{output_directory}/velocity_simulation.pdf")
+    simulation_data_available = not dataset.empty and dataset['velocity'].nunique() > 1
+    if simulation_data_available:
+        g = sns.FacetGrid(
+            dataset,
+            col='intrinsicLateralMultiplier',
+            aspect=1.7,
+            height=5,
+            col_wrap=3,
+            sharex=True,
+            sharey=True,
+        )
+        # common_norm=True keeps the RELATIVE mass of each forward coefficient instead of
+        # rescaling every curve to unit area; this way tall/short curves reflect how much
+        # probability each parameter actually puts at a given speed and can be read against
+        # the real distribution on the same y-scale.
+        g.map_dataframe(
+            sns.kdeplot,
+            x='velocity',
+            hue='intrinsicForwardCoefficient',
+            linewidth=0.8,
+            palette='viridis',
+            bw_adjust=BW,
+            clip=CLIP,
+            common_norm=True,
+        )
+        for ax in g.axes.flat:
+            ax.set_xlim(0, XMAX_MS)
+        g.set_titles("LateralVelocityMultiplier={col_name}")
+        g.set_xlabels("Velocity (m/s)")
+        # Colour legend: intrinsicForwardCoefficient is a continuous swept variable, so the
+        # colours are a viridis ramp — a colorbar is the correct legend for them.
+        norm = matplotlib.colors.Normalize(vmin=min(coefficients_to_keep),
+                                           vmax=max(coefficients_to_keep))
+        sm = cmx.ScalarMappable(cmap='viridis', norm=norm)
+        sm.set_array([])
+        g.figure.subplots_adjust(right=0.9)
+        g.figure.colorbar(sm, ax=list(g.axes.flat), label='intrinsicForwardCoefficient')
+        g.savefig(f"{output_directory}/velocity_simulation.pdf")
+        plt.close(g.figure)
+    else:
+        print(
+            "WARNING: Skipping simulation velocity charts: no varying samples remain "
+            "after removing initialization and sub-1-km/h values."
+        )
 
     # --- Real velocity plot ---------------------------------------------------------
     real_dataset = pd.read_csv("data/velocity_reconstruction.csv", delimiter=' ', comment='#', names=list(range(10)))
@@ -582,46 +589,49 @@ if __name__ == '__main__':
     plt.xlabel("Velocity (m/s)")
     real_plot.get_figure().savefig(f"{output_directory}/velocity_reconstruction.pdf")
 
-    # --- Direct overlay: real vs pooled simulation ----------------------------------
-    # A single figure so the two can be compared at a glance on identical axes. Each
-    # curve is a probability density (area 1) because the sample sizes differ by orders
-    # of magnitude; the shapes, modes and tails are what carry the comparison.
-    plt.figure(figsize=(10, 6), layout='tight')
-    ax = sns.kdeplot(data=real_dataset, x='velocity', color='#2a78d6', fill=True,
-                     alpha=0.2, bw_adjust=BW, clip=CLIP, linewidth=3, label='Real (KABR)')
-    sns.kdeplot(data=dataset, x='velocity', color='#eb6834', bw_adjust=BW, clip=CLIP,
-                linewidth=3, label='Simulation (all params pooled)')
-    ax.axvline(real_dataset['velocity'].mean(), color='#2a78d6', ls='--', lw=1.5)
-    ax.axvline(dataset['velocity'].mean(), color='#eb6834', ls='--', lw=1.5)
-    ax.set_xlim(0, XMAX_MS)
-    ax.set_xlabel("Velocity (m/s)")
+    if simulation_data_available:
+        # --- Direct overlay: real vs pooled simulation ------------------------------
+        # A single figure so the two can be compared at a glance on identical axes. Each
+        # curve is a probability density (area 1) because the sample sizes differ by orders
+        # of magnitude; the shapes, modes and tails are what carry the comparison.
+        plt.figure(figsize=(10, 6), layout='tight')
+        ax = sns.kdeplot(data=real_dataset, x='velocity', color='#2a78d6', fill=True,
+                         alpha=0.2, bw_adjust=BW, clip=CLIP, linewidth=3, label='Real (KABR)')
+        sns.kdeplot(data=dataset, x='velocity', color='#eb6834', bw_adjust=BW, clip=CLIP,
+                    linewidth=3, label='Simulation (all params pooled)')
+        ax.axvline(real_dataset['velocity'].mean(), color='#2a78d6', ls='--', lw=1.5)
+        ax.axvline(dataset['velocity'].mean(), color='#eb6834', ls='--', lw=1.5)
+        ax.set_xlim(0, XMAX_MS)
+        ax.set_xlabel("Velocity (m/s)")
 
-    # --- Similarity metrics (real vs pooled sim), same computation as curve_similarity
-    # in compare_distributions.py: densities on a shared grid, then overlap/Pearson.
-    real_v = real_dataset['velocity'].values
-    sim_v = dataset['velocity'].values
-    grid = np.linspace(0, XMAX_MS, 512)
-    dx = grid[1] - grid[0]
-    kde_r = stats.gaussian_kde(real_v, bw_method="scott"); kde_r.set_bandwidth(kde_r.factor * BW)
-    kde_s = stats.gaussian_kde(sim_v, bw_method="scott"); kde_s.set_bandwidth(kde_s.factor * BW)
-    fr, fs = kde_r(grid), kde_s(grid)
-    fr /= fr.sum() * dx; fs /= fs.sum() * dx
-    overlap = float(np.sum(np.minimum(fr, fs)) * dx)
-    pearson = float(np.corrcoef(fr, fs)[0, 1])
-    d_mean = dataset['velocity'].mean() - real_dataset['velocity'].mean()
-    d_std = dataset['velocity'].std() - real_dataset['velocity'].std()
-    txt = (f"Overlap   {overlap:.3f}\n"
-           f"Pearson   {pearson:.3f}\n"
-           f"Δ mean    {d_mean:+.3f} m/s\n"
-           f"Δ SD      {d_std:+.3f} m/s")
-    ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right", va="top",
-            family="monospace", fontsize=11,
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.95))
-    ax.legend(loc="center right")
-    ax.get_figure().savefig(f"{output_directory}/velocity_real_vs_sim.pdf")
+        # --- Similarity metrics (real vs pooled sim), same computation as
+        # curve_similarity in compare_distributions.py: densities on a shared grid,
+        # then overlap/Pearson.
+        real_v = real_dataset['velocity'].values
+        sim_v = dataset['velocity'].values
+        grid = np.linspace(0, XMAX_MS, 512)
+        dx = grid[1] - grid[0]
+        kde_r = stats.gaussian_kde(real_v, bw_method="scott"); kde_r.set_bandwidth(kde_r.factor * BW)
+        kde_s = stats.gaussian_kde(sim_v, bw_method="scott"); kde_s.set_bandwidth(kde_s.factor * BW)
+        fr, fs = kde_r(grid), kde_s(grid)
+        fr /= fr.sum() * dx; fs /= fs.sum() * dx
+        overlap = float(np.sum(np.minimum(fr, fs)) * dx)
+        pearson = float(np.corrcoef(fr, fs)[0, 1])
+        d_mean = dataset['velocity'].mean() - real_dataset['velocity'].mean()
+        d_std = dataset['velocity'].std() - real_dataset['velocity'].std()
+        txt = (f"Overlap   {overlap:.3f}\n"
+               f"Pearson   {pearson:.3f}\n"
+               f"Δ mean    {d_mean:+.3f} m/s\n"
+               f"Δ SD      {d_std:+.3f} m/s")
+        ax.text(0.97, 0.95, txt, transform=ax.transAxes, ha="right", va="top",
+                family="monospace", fontsize=11,
+                bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.95))
+        ax.legend(loc="center right")
+        ax.get_figure().savefig(f"{output_directory}/velocity_real_vs_sim.pdf")
+
+        print(f"Sim :  N={len(dataset)}  mean={dataset['velocity'].mean():.3f} m/s")
+        print(f"Overlap={overlap:.3f}  Pearson={pearson:.3f}  Δmean={d_mean:+.3f}  ΔSD={d_std:+.3f}")
 
     print(f"Real:  N={len(real_dataset)}  mean={real_dataset['velocity'].mean():.3f} m/s")
-    print(f"Sim :  N={len(dataset)}  mean={dataset['velocity'].mean():.3f} m/s")
-    print(f"Overlap={overlap:.3f}  Pearson={pearson:.3f}  Δmean={d_mean:+.3f}  ΔSD={d_std:+.3f}")
 
     plt.show()
